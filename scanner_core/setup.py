@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'safety_monitor = scanner_core.safety_monitor:main',
         ],
     },
 )
