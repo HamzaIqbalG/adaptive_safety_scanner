@@ -2,6 +2,7 @@ import rclpy
 from rclpy.node import Node
 import numpy as np
 from scanner_core.simple_tracker import EuclideanTracker
+from scanner_core.safety_zone import SafetyZone
 from sklearn.cluster import DBSCAN
 from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
@@ -27,6 +28,28 @@ class ClusterDetector(Node):
         self.get_logger().info('Cluster Detector Node Started')
 
         self.tracker = EuclideanTracker() #tracker
+
+        # --- SAFETY ZONES ---
+        # Define polygon points (x, y) relative to the sensor
+        # Warning Zone (Yellow): 1.5m x 1.5m box
+        self.warning_zone = SafetyZone("Warning", 901, 
+            [(0, 0.75), (1.5, 0.75), (1.5, -0.75), (0, -0.75)], 
+            (1.0, 1.0, 0.0, 0.8)) # Yellow
+
+        # Critical Zone (Red): 0.6m x 0.6m box
+        self.critical_zone = SafetyZone("Critical", 902, 
+            [(0, 0.3), (0.6, 0.3), (0.6, -0.3), (0, -0.3)], 
+            (1.0, 0.0, 0.0, 0.8)) # Red
+
+        # Timer to publish zone visuals (1 Hz is enough, they don't move)
+        self.create_timer(1.0, self.publish_zones)
+    
+
+    def publish_zones(self):
+        marker_array = MarkerArray()
+        marker_array.markers.append(self.warning_zone.get_marker())
+        marker_array.markers.append(self.critical_zone.get_marker())
+        self.marker_pub.publish(marker_array)
 
     def scan_callback(self, msg):
         # --- STEP 1: CONVERT POLAR TO CARTESIAN ---
