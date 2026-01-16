@@ -51,6 +51,33 @@ class ClusterDetector(Node):
         marker_array.markers.append(self.critical_zone.get_marker())
         self.marker_pub.publish(marker_array)
 
+    def check_safety_rules(self, tracked_objects):
+        status = "SAFE"
+        nearest_dist = 999.9
+        
+        for obj in tracked_objects.values():
+            x, y = obj.centroid
+            
+            # Check Critical Zone (Red) - Priority 1
+            if self.critical_zone.contains(x, y):
+                status = "CRITICAL"
+                # We don't break immediately because we might want to find the closest object later
+                # but for simple logic, Critical is the worst case.
+            
+            # Check Warning Zone (Yellow) - Priority 2
+            elif self.warning_zone.contains(x, y) and status != "CRITICAL":
+                status = "WARNING"
+
+        # Log the decision
+        if status == "CRITICAL":
+            self.get_logger().error("!!! CRITICAL ZONE BREACH - EMERGENCY STOP !!!", throttle_duration_sec=0.5)
+        elif status == "WARNING":
+            self.get_logger().warn("Warning Zone Breach - Slowing Down...", throttle_duration_sec=1.0)
+        else:
+            self.get_logger().info("Zone Clear", throttle_duration_sec=2.0)
+            
+        return status
+
     def scan_callback(self, msg):
         # --- STEP 1: CONVERT POLAR TO CARTESIAN ---
         # Create angles array
@@ -112,8 +139,12 @@ class ClusterDetector(Node):
         current_time = now.nanoseconds / 1e9
         
         tracked_objects = self.tracker.update(detected_centroids, current_time)
+
+        # --- NEW STEP: CHECK SAFETY RULES ---
+        current_status = self.check_safety_rules(tracked_objects)
         
-        self.get_logger().info(f'Tracking {len(tracked_objects)} objects', throttle_duration_sec=1.0)
+        #this line below is not necessary anymore as the function logs for us now
+        #self.get_logger().info(f'Tracking {len(tracked_objects)} objects', throttle_duration_sec=1.0)
 
         # --- STEP 5: VISUALIZATION ---
         self.publish_tracked_objects(tracked_objects)
