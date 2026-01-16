@@ -1,6 +1,7 @@
 import rclpy
 from rclpy.node import Node
 import numpy as np
+from scanner_core.simple_tracker import EuclideanTracker
 from sklearn.cluster import DBSCAN
 from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
@@ -20,10 +21,12 @@ class ClusterDetector(Node):
         # DBSCAN Parameters (The "Tuning Knobs")
         # eps: Max distance between two points to be considered neighbors (0.3m = 30cm)
         # min_samples: Min points to form a cluster (noise reduction)
-        self.epsilon = 0.30 
-        self.min_samples = 5
+        self.epsilon = 0.50 #o.3 original
+        self.min_samples = 5 # 5 original
         
         self.get_logger().info('Cluster Detector Node Started')
+
+        self.tracker = EuclideanTracker() #tracker
 
     def scan_callback(self, msg):
         # --- STEP 1: CONVERT POLAR TO CARTESIAN ---
@@ -68,52 +71,131 @@ class ClusterDetector(Node):
             
         self.get_logger().info(f'Found {len(unique_labels)} objects', throttle_duration_sec=1.0)
 
-        # --- STEP 3: VISUALIZATION ---
-        self.publish_markers(points_xy, labels, unique_labels)
-
-    def publish_markers(self, points, labels, unique_labels):
-        marker_array = MarkerArray()
-        
-        # For every cluster found...
+        # --- STEP 3: PREPARE CENTROIDS FOR TRACKER ---
+        detected_centroids = []
         for label_id in unique_labels:
-            # Get points belonging to this cluster
+            # Get points for this cluster
             cluster_mask = (labels == label_id)
-            cluster_points = points[cluster_mask]
+            cluster_points = points_xy[cluster_mask]
             
-            # Calculate Centroid (Average X, Average Y)
-            centroid_x = np.mean(cluster_points[:, 0])
-            centroid_y = np.mean(cluster_points[:, 1])
-            
-            # Create a Marker (Cube)
-            marker = Marker()
-            marker.header.frame_id = "laser"
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = "clusters"
-            marker.id = int(label_id)
-            marker.type = Marker.CUBE
-            marker.action = Marker.ADD
-            
-            # Position the marker at the centroid
-            marker.pose.position.x = centroid_x
-            marker.pose.position.y = centroid_y
-            marker.pose.position.z = 0.0
-            
-            # Size (Fixed size 20cm box for now)
-            marker.scale.x = 0.2
-            marker.scale.y = 0.2
-            marker.scale.z = 0.2
-            
-            # Color (Green)
-            marker.color.a = 1.0  # Alpha (Transparency)
-            marker.color.r = 0.0
-            marker.color.g = 1.0
-            marker.color.b = 0.0
-            
-            marker_array.markers.append(marker)
+            # Calculate Centroid
+            cx = np.mean(cluster_points[:, 0])
+            cy = np.mean(cluster_points[:, 1])
+            detected_centroids.append((cx, cy))
         
-        # Clear old markers (Optional but good practice to prevent "ghost" boxes)
-        # Note: Proper delete logic is complex, for Day 2 we just publish what we see.
+        # --- STEP 4: UPDATE TRACKER ---
+        # Get current ROS time in seconds
+        now = self.get_clock().now()
+        current_time = now.nanoseconds / 1e9
         
+        tracked_objects = self.tracker.update(detected_centroids, current_time)
+        
+        self.get_logger().info(f'Tracking {len(tracked_objects)} objects', throttle_duration_sec=1.0)
+
+        # --- STEP 5: VISUALIZATION ---
+        self.publish_tracked_objects(tracked_objects)
+
+    def publish_tracked_objects(self, tracked_objects):
+        marker_array = MarkerArray()
+
+        # --- OPTIONAL: CLEAR OLD MARKERS ---
+        # A marker with action=3 (DELETEALL) clears the namespace before adding new ones
+        clear_marker = Marker()
+        clear_marker.header.frame_id = "laser"
+        clear_marker.ns = "boxes"
+        clear_marker.action = Marker.DELETEALL
+        marker_array.markers.append(clear_marker)
+        
+        # We need a separate clear command for each namespace (ids, velocity)
+        clear_text = Marker()
+        clear_text.header.frame_id = "laser"
+        clear_text.ns = "ids"
+        clear_text.action = Marker.DELETEALL
+        marker_array.markers.append(clear_text)
+
+        clear_arrow = Marker()
+        clear_arrow.header.frame_id = "laser"
+        clear_arrow.ns = "velocity"
+        clear_arrow.action = Marker.DELETEALL
+        marker_array.markers.append(clear_arrow)
+
+        for obj in tracked_objects.values():
+            # 1. The Box (Green)
+            box_marker = Marker()
+            box_marker.header.frame_id = "laser"
+            box_marker.header.stamp = self.get_clock().now().to_msg()
+            box_marker.ns = "boxes"
+            box_marker.id = int(obj.id)
+            box_marker.type = Marker.CUBE
+            box_marker.action = Marker.ADD
+            box_marker.pose.position.x = obj.centroid[0]
+            box_marker.pose.position.y = obj.centroid[1]
+            box_marker.scale.x = 0.2
+            box_marker.scale.y = 0.2
+            box_marker.scale.z = 0.2
+            box_marker.color.a = 0.8
+            box_marker.color.g = 1.0
+            # --- FIX: Set Lifetime to 0.2 seconds ---
+            box_marker.lifetime.sec = 0
+            box_marker.lifetime.nanosec = 200000000 
+            
+            marker_array.markers.append(box_marker)
+            
+            # 2. The ID Text (White)
+            text_marker = Marker()
+            text_marker.header.frame_id = "laser"
+            text_marker.header.stamp = self.get_clock().now().to_msg()
+            text_marker.ns = "ids"
+            text_marker.id = int(obj.id) + 1000 
+            text_marker.type = Marker.TEXT_VIEW_FACING
+            text_marker.action = Marker.ADD
+            text_marker.pose.position.x = obj.centroid[0]
+            text_marker.pose.position.y = obj.centroid[1]
+            text_marker.pose.position.z = 0.3 
+            text_marker.scale.z = 0.15 
+            text_marker.color.a = 1.0
+            text_marker.color.r = 1.0
+            text_marker.color.g = 1.0
+            text_marker.color.b = 1.0
+            # --- FIX: Set Lifetime ---
+            text_marker.lifetime.sec = 0
+            text_marker.lifetime.nanosec = 200000000
+
+            vel_mag = np.linalg.norm(obj.velocity)
+            text_marker.text = f"ID:{obj.id}\nV:{vel_mag:.2f}m/s"
+            marker_array.markers.append(text_marker)
+
+            # 3. The Velocity Arrow (Red)
+            if vel_mag > 0.1: 
+                arrow_marker = Marker()
+                arrow_marker.header.frame_id = "laser"
+                arrow_marker.header.stamp = self.get_clock().now().to_msg()
+                arrow_marker.ns = "velocity"
+                arrow_marker.id = int(obj.id) + 2000
+                arrow_marker.type = Marker.ARROW
+                arrow_marker.action = Marker.ADD
+                
+                start = Point()
+                start.x = obj.centroid[0]
+                start.y = obj.centroid[1]
+                
+                end = Point()
+                end.x = obj.centroid[0] + obj.velocity[0] * 0.5
+                end.y = obj.centroid[1] + obj.velocity[1] * 0.5
+                
+                arrow_marker.points = [start, end]
+                
+                arrow_marker.scale.x = 0.05 
+                arrow_marker.scale.y = 0.1  
+                arrow_marker.scale.z = 0.1  
+                arrow_marker.color.a = 1.0
+                arrow_marker.color.r = 1.0 
+                # --- FIX: Set Lifetime ---
+                arrow_marker.lifetime.sec = 0
+                arrow_marker.lifetime.nanosec = 200000000
+                
+                marker_array.markers.append(arrow_marker)
+
         self.marker_pub.publish(marker_array)
 
 def main(args=None):
