@@ -19,29 +19,54 @@ class ClusterDetector(Node):
         # 2. Publisher for Visualizing Clusters in RViz
         self.marker_pub = self.create_publisher(MarkerArray, 'visualization_marker_array', 10)
         
-        # DBSCAN Parameters (The "Tuning Knobs")
-        # eps: Max distance between two points to be considered neighbors (0.3m = 30cm)
-        # min_samples: Min points to form a cluster (noise reduction)
-        self.epsilon = 0.50 #o.3 original
-        self.min_samples = 5 # 5 original
+        # DBSCAN Parameters (Your Tuned Values)
+        self.epsilon = 0.30     # Keep this (Stable)
+        self.min_samples = 10   # Keep this (Stable)
         
         self.get_logger().info('Cluster Detector Node Started')
 
-        self.tracker = EuclideanTracker() #tracker
+        self.tracker = EuclideanTracker() 
 
-        # --- SAFETY ZONES ---
-        # Define polygon points (x, y) relative to the sensor
-        # Warning Zone (Yellow): 1.5m x 1.5m box
+        #  # ---  ORIGINAL SAFETY ZONES ---
+        # # Define polygon points (x, y) relative to the sensor
+        # # Warning Zone (Yellow): 1.5m x 1.5m box
+        # self.warning_zone = SafetyZone("Warning", 901,
+
+        #     [(0, 0.75), (1.5, 0.75), (1.5, -0.75), (0, -0.75)],
+
+        #     (1.0, 1.0, 0.0, 0.8)) # Yellow
+
+        # # Critical Zone (Red): 0.6m x 0.6m box
+        # self.critical_zone = SafetyZone("Critical", 902,
+
+        #     [(0, 0.3), (0.6, 0.3), (0.6, -0.3), (0, -0.3)],
+
+        #     (1.0, 0.0, 0.0, 0.8)) # Red
+        
+        # # Timer to publish zone visuals (1 Hz is enough, they don't move)
+        # self.create_timer(1.0, self.publish_zones)
+        
+
+
+
+        # --- SAFETY ZONES (ADJUSTED FOR 0.5m BLIND SPOT) ---
+        # Since the robot is blind for the first 0.5m, we push the zones OUT.
+        
+        # Warning Zone (Yellow): 
+        # Starts at x=0, goes to x=1.8m (giving you plenty of space to be seen)
+        # Width is +/- 0.9m
         self.warning_zone = SafetyZone("Warning", 901, 
-            [(0, 0.75), (1.5, 0.75), (1.5, -0.75), (0, -0.75)], 
+            [(0, 0.9), (1.8, 0.9), (1.8, -0.9), (0, -0.9)], 
             (1.0, 1.0, 0.0, 0.8)) # Yellow
 
-        # Critical Zone (Red): 0.6m x 0.6m box
+        # Critical Zone (Red): 
+        # Starts at x=0, goes to x=0.9m. 
+        # Effective Detection Area: 0.5m (blind) to 0.9m (critical boundary)
         self.critical_zone = SafetyZone("Critical", 902, 
-            [(0, 0.3), (0.6, 0.3), (0.6, -0.3), (0, -0.3)], 
+            [(0, 0.5), (0.9, 0.5), (0.9, -0.5), (0, -0.5)], 
             (1.0, 0.0, 0.0, 0.8)) # Red
 
-        # Timer to publish zone visuals (1 Hz is enough, they don't move)
+        # Timer to publish zone visuals
         self.create_timer(1.0, self.publish_zones)
     
 
@@ -53,26 +78,35 @@ class ClusterDetector(Node):
 
     def check_safety_rules(self, tracked_objects):
         status = "SAFE"
-        nearest_dist = 999.9
+        lookahead_time = 1.0 # Look 1 second into the future
         
         for obj in tracked_objects.values():
             x, y = obj.centroid
+            vx, vy = obj.velocity
             
-            # Check Critical Zone (Red) - Priority 1
+            # 1. Check CURRENT Position (The "Real" Breach)
             if self.critical_zone.contains(x, y):
                 status = "CRITICAL"
-                # We don't break immediately because we might want to find the closest object later
-                # but for simple logic, Critical is the worst case.
+                break # Worst case found, stop checking
             
-            # Check Warning Zone (Yellow) - Priority 2
-            elif self.warning_zone.contains(x, y) and status != "CRITICAL":
+            if self.warning_zone.contains(x, y) and status != "CRITICAL":
                 status = "WARNING"
 
-        # Log the decision
+            # 2. Check FUTURE Position (The "TTC" Prediction)
+            # Only check this if we aren't already in a critical state
+            if status != "CRITICAL":
+                pred_x = x + (vx * lookahead_time)
+                pred_y = y + (vy * lookahead_time)
+                
+                if self.critical_zone.contains(pred_x, pred_y):
+                    self.get_logger().warn(f"Obj {obj.id} will hit Critical Zone in {lookahead_time}s!", throttle_duration_sec=1.0)
+                    if status == "SAFE": status = "WARNING" # Upgrade Safe to Warning
+
+        # Log and Publish Decision
         if status == "CRITICAL":
-            self.get_logger().error("!!! CRITICAL ZONE BREACH - EMERGENCY STOP !!!", throttle_duration_sec=0.5)
+            self.get_logger().error("!!! CRITICAL BREACH - E-STOP !!!", throttle_duration_sec=0.5)
         elif status == "WARNING":
-            self.get_logger().warn("Warning Zone Breach - Slowing Down...", throttle_duration_sec=1.0)
+            self.get_logger().warn("Warning - Object Approaching or Inside Zone", throttle_duration_sec=1.0)
         else:
             self.get_logger().info("Zone Clear", throttle_duration_sec=2.0)
             
@@ -91,8 +125,8 @@ class ClusterDetector(Node):
         angles = angles[:min_len]
         ranges = ranges[:min_len]
 
-        # Filter: Remove 'inf' and '0' and faraway points (> 10m)
-        valid_mask = (ranges > 0.05) & (ranges < 10.0) & (np.isfinite(ranges))
+        # Filter: Remove 'inf' and '0' and faraway points (> 10m) ORIGINAL VALID MASK LINE
+        valid_mask = (ranges > 0.5) & (ranges < 10.0) & (np.isfinite(ranges)) & (angles > -1.57) & (angles < 1.57)
         
         if np.sum(valid_mask) < self.min_samples:
             return  # Not enough points to cluster
