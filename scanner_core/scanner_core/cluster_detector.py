@@ -1,288 +1,204 @@
 import rclpy
 from rclpy.node import Node
 import numpy as np
-from scanner_core.simple_tracker import EuclideanTracker
-from scanner_core.safety_zone import SafetyZone
 from sklearn.cluster import DBSCAN
 from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 
+# Local Imports
+from scanner_core.simple_tracker import EuclideanTracker
+from scanner_core.safety_zone import SafetyZone
+
 class ClusterDetector(Node):
+    """
+    ROS 2 Node for 2D LiDAR Object Detection and Safety Monitoring.
+    
+    Pipeline:
+    1. Receives /scan data (Polar coordinates).
+    2. Converts to Cartesian (X, Y) and filters noise/background.
+    3. Clusters points using DBSCAN to find objects.
+    4. Tracks objects over time to calculate velocity.
+    5. Monitors Safety Zones (Warning/Critical) and triggers alerts.
+    """
+    
     def __init__(self):
         super().__init__('cluster_detector')
         
-        # 1. Subscribe to LIDAR
+        # 1. Subscribers & Publishers
         self.subscription = self.create_subscription(
             LaserScan, '/scan', self.scan_callback, 10)
-        
-        # 2. Publisher for Visualizing Clusters in RViz
         self.marker_pub = self.create_publisher(MarkerArray, 'visualization_marker_array', 10)
         
-        # DBSCAN Parameters (Your Tuned Values)
-        self.epsilon = 0.30     # Keep this (Stable)
-        self.min_samples = 10   # Keep this (Stable)
-        
-        self.get_logger().info('Cluster Detector Node Started')
-
+        # 2. Perception Tuning (Calibrated for Desktop Environment)
+        self.epsilon = 0.30       # Max distance between points in a cluster
+        self.min_samples = 10     # High threshold to ignore table surface noise
         self.tracker = EuclideanTracker() 
 
-        #  # ---  ORIGINAL SAFETY ZONES ---
-        # # Define polygon points (x, y) relative to the sensor
-        # # Warning Zone (Yellow): 1.5m x 1.5m box
-        # self.warning_zone = SafetyZone("Warning", 901,
-
-        #     [(0, 0.75), (1.5, 0.75), (1.5, -0.75), (0, -0.75)],
-
-        #     (1.0, 1.0, 0.0, 0.8)) # Yellow
-
-        # # Critical Zone (Red): 0.6m x 0.6m box
-        # self.critical_zone = SafetyZone("Critical", 902,
-
-        #     [(0, 0.3), (0.6, 0.3), (0.6, -0.3), (0, -0.3)],
-
-        #     (1.0, 0.0, 0.0, 0.8)) # Red
+        # 3. Safety Zones
+        # Note: Zones are offset to account for 0.5m blind spot masking
         
-        # # Timer to publish zone visuals (1 Hz is enough, they don't move)
-        # self.create_timer(1.0, self.publish_zones)
-        
-
-
-
-        # --- SAFETY ZONES (ADJUSTED FOR 0.5m BLIND SPOT) ---
-        # Since the robot is blind for the first 0.5m, we push the zones OUT.
-        
-        # Warning Zone (Yellow): 
-        # Starts at x=0, goes to x=1.8m (giving you plenty of space to be seen)
-        # Width is +/- 0.9m
+        # Warning Zone (Yellow): 1.8m Reach
         self.warning_zone = SafetyZone("Warning", 901, 
             [(0, 0.9), (1.8, 0.9), (1.8, -0.9), (0, -0.9)], 
-            (1.0, 1.0, 0.0, 0.8)) # Yellow
+            (1.0, 1.0, 0.0, 0.8))
 
-        # Critical Zone (Red): 
-        # Starts at x=0, goes to x=0.9m. 
-        # Effective Detection Area: 0.5m (blind) to 0.9m (critical boundary)
+        # Critical Zone (Red): 0.9m Reach (Effective 0.5-0.9m)
         self.critical_zone = SafetyZone("Critical", 902, 
             [(0, 0.5), (0.9, 0.5), (0.9, -0.5), (0, -0.5)], 
-            (1.0, 0.0, 0.0, 0.8)) # Red
+            (1.0, 0.0, 0.0, 0.8))
 
-        # Timer to publish zone visuals
+        # 4. Timer
+        self.get_logger().info('Cluster Detector Node Started - Ready.')
         self.create_timer(1.0, self.publish_zones)
-    
 
     def publish_zones(self):
+        """Publishes the static Safety Zone polygons to RViz."""
         marker_array = MarkerArray()
         marker_array.markers.append(self.warning_zone.get_marker())
         marker_array.markers.append(self.critical_zone.get_marker())
         self.marker_pub.publish(marker_array)
 
     def check_safety_rules(self, tracked_objects):
+        """
+        Evaluates current AND future positions of objects against safety zones.
+        Returns: 'SAFE', 'WARNING', or 'CRITICAL'
+        """
         status = "SAFE"
-        lookahead_time = 1.0 # Look 1 second into the future
+        lookahead_time = 1.0 # Predict 1 second into the future
         
         for obj in tracked_objects.values():
             x, y = obj.centroid
             vx, vy = obj.velocity
             
-            # 1. Check CURRENT Position (The "Real" Breach)
+            # A. Check CURRENT Position (Immediate Breach)
             if self.critical_zone.contains(x, y):
                 status = "CRITICAL"
-                break # Worst case found, stop checking
+                break # Stop checking, worst case found
             
             if self.warning_zone.contains(x, y) and status != "CRITICAL":
                 status = "WARNING"
 
-            # 2. Check FUTURE Position (The "TTC" Prediction)
-            # Only check this if we aren't already in a critical state
+            # B. Check FUTURE Position (Time-To-Collision Prediction)
             if status != "CRITICAL":
                 pred_x = x + (vx * lookahead_time)
                 pred_y = y + (vy * lookahead_time)
                 
                 if self.critical_zone.contains(pred_x, pred_y):
-                    self.get_logger().warn(f"Obj {obj.id} will hit Critical Zone in {lookahead_time}s!", throttle_duration_sec=1.0)
-                    if status == "SAFE": status = "WARNING" # Upgrade Safe to Warning
+                    self.get_logger().warn(f"Obj {obj.id} collision predicted in {lookahead_time}s!", throttle_duration_sec=1.0)
+                    if status == "SAFE": status = "WARNING"
 
-        # Log and Publish Decision
+        # Log Decision
         if status == "CRITICAL":
             self.get_logger().error("!!! CRITICAL BREACH - E-STOP !!!", throttle_duration_sec=0.5)
         elif status == "WARNING":
-            self.get_logger().warn("Warning - Object Approaching or Inside Zone", throttle_duration_sec=1.0)
-        else:
-            self.get_logger().info("Zone Clear", throttle_duration_sec=2.0)
+            self.get_logger().warn("Warning - Object Approaching", throttle_duration_sec=1.0)
             
         return status
 
     def scan_callback(self, msg):
-        # --- STEP 1: CONVERT POLAR TO CARTESIAN ---
-        # Create angles array
+        # Step 1: Data Conversion
         angles = np.arange(msg.angle_min, msg.angle_max, msg.angle_increment)
         ranges = np.array(msg.ranges)
 
-        # --- FIX: ROBUST SIZE MATCHING ---
-        # Sometimes angles and ranges differ by 1 due to floating point math.
-        # We simply truncate both to the shortest length.
+        # Truncate to matching lengths (floating point safety)
         min_len = min(len(angles), len(ranges))
         angles = angles[:min_len]
         ranges = ranges[:min_len]
 
-        # Filter: Remove 'inf' and '0' and faraway points (> 10m) ORIGINAL VALID MASK LINE
-        valid_mask = (ranges > 0.5) & (ranges < 10.0) & (np.isfinite(ranges)) & (angles > -1.57) & (angles < 1.57)
+        # Step 2: Filtering
+        # Mask out near-field noise (<0.5m) and far background (>10m)
+        valid_mask = (ranges > 0.50) & (ranges < 10.0) & (np.isfinite(ranges))
         
         if np.sum(valid_mask) < self.min_samples:
-            return  # Not enough points to cluster
+            return 
 
-        # Apply mask
         r_filtered = ranges[valid_mask]
         a_filtered = angles[valid_mask]
 
-        # Polar -> Cartesian Math: X = r*cos(theta), Y = r*sin(theta)
         x = r_filtered * np.cos(a_filtered)
         y = r_filtered * np.sin(a_filtered)
-        
-        # Stack them into an (N, 2) array for sklearn
-        # format: [[x1, y1], [x2, y2], ...]
         points_xy = np.column_stack((x, y))
 
-        # --- STEP 2: CLUSTERING (DBSCAN) ---
-        # This is the "AI" part. It groups nearby points.
+        # Step 3: Clustering (DBSCAN)
         clustering = DBSCAN(eps=self.epsilon, min_samples=self.min_samples).fit(points_xy)
         labels = clustering.labels_
-        
-        # unique_labels includes -1 (noise), so we filter that out
-        unique_labels = set(labels)
-        if -1 in unique_labels:
-            unique_labels.remove(-1)
-            
-        self.get_logger().info(f'Found {len(unique_labels)} objects', throttle_duration_sec=1.0)
+        unique_labels = set(labels) - {-1} # Exclude noise (-1)
 
-        # --- STEP 3: PREPARE CENTROIDS FOR TRACKER ---
+        # Step 4: Centroid Calculation
         detected_centroids = []
         for label_id in unique_labels:
-            # Get points for this cluster
             cluster_mask = (labels == label_id)
             cluster_points = points_xy[cluster_mask]
-            
-            # Calculate Centroid
             cx = np.mean(cluster_points[:, 0])
             cy = np.mean(cluster_points[:, 1])
             detected_centroids.append((cx, cy))
         
-        # --- STEP 4: UPDATE TRACKER ---
-        # Get current ROS time in seconds
+        # Step 5: Tracking & Safety Logic
         now = self.get_clock().now()
         current_time = now.nanoseconds / 1e9
-        
         tracked_objects = self.tracker.update(detected_centroids, current_time)
-
-        # --- NEW STEP: CHECK SAFETY RULES ---
-        current_status = self.check_safety_rules(tracked_objects)
-        
-        #this line below is not necessary anymore as the function logs for us now
-        #self.get_logger().info(f'Tracking {len(tracked_objects)} objects', throttle_duration_sec=1.0)
-
-        # --- STEP 5: VISUALIZATION ---
+        self.check_safety_rules(tracked_objects)
         self.publish_tracked_objects(tracked_objects)
 
     def publish_tracked_objects(self, tracked_objects):
+        """Visualizes objects (Green Box), IDs (Text), and Velocity (Red Arrow)."""
         marker_array = MarkerArray()
 
-        # --- OPTIONAL: CLEAR OLD MARKERS ---
-        # A marker with action=3 (DELETEALL) clears the namespace before adding new ones
-        clear_marker = Marker()
-        clear_marker.header.frame_id = "laser"
-        clear_marker.ns = "boxes"
-        clear_marker.action = Marker.DELETEALL
-        marker_array.markers.append(clear_marker)
-        
-        # We need a separate clear command for each namespace (ids, velocity)
-        clear_text = Marker()
-        clear_text.header.frame_id = "laser"
-        clear_text.ns = "ids"
-        clear_text.action = Marker.DELETEALL
-        marker_array.markers.append(clear_text)
-
-        clear_arrow = Marker()
-        clear_arrow.header.frame_id = "laser"
-        clear_arrow.ns = "velocity"
-        clear_arrow.action = Marker.DELETEALL
-        marker_array.markers.append(clear_arrow)
+        # Clear old markers to prevent ghosting
+        for ns in ["boxes", "ids", "velocity"]:
+            clear_marker = Marker()
+            clear_marker.action = Marker.DELETEALL
+            clear_marker.ns = ns
+            marker_array.markers.append(clear_marker)
 
         for obj in tracked_objects.values():
-            # 1. The Box (Green)
-            box_marker = Marker()
-            box_marker.header.frame_id = "laser"
-            box_marker.header.stamp = self.get_clock().now().to_msg()
-            box_marker.ns = "boxes"
-            box_marker.id = int(obj.id)
-            box_marker.type = Marker.CUBE
-            box_marker.action = Marker.ADD
-            box_marker.pose.position.x = obj.centroid[0]
-            box_marker.pose.position.y = obj.centroid[1]
-            box_marker.scale.x = 0.2
-            box_marker.scale.y = 0.2
-            box_marker.scale.z = 0.2
-            box_marker.color.a = 0.8
-            box_marker.color.g = 1.0
-            # --- FIX: Set Lifetime to 0.2 seconds ---
-            box_marker.lifetime.sec = 0
-            box_marker.lifetime.nanosec = 200000000 
+            # 1. Bounding Box
+            box = Marker()
+            box.header.frame_id = "laser"
+            box.header.stamp = self.get_clock().now().to_msg()
+            box.ns = "boxes"
+            box.id = int(obj.id)
+            box.type = Marker.CUBE
+            box.action = Marker.ADD
+            box.pose.position.x, box.pose.position.y = obj.centroid
+            box.scale.x = box.scale.y = box.scale.z = 0.2
+            box.color.a = 0.8; box.color.g = 1.0
+            box.lifetime.nanosec = 200000000 # 0.2s
+            marker_array.markers.append(box)
             
-            marker_array.markers.append(box_marker)
-            
-            # 2. The ID Text (White)
-            text_marker = Marker()
-            text_marker.header.frame_id = "laser"
-            text_marker.header.stamp = self.get_clock().now().to_msg()
-            text_marker.ns = "ids"
-            text_marker.id = int(obj.id) + 1000 
-            text_marker.type = Marker.TEXT_VIEW_FACING
-            text_marker.action = Marker.ADD
-            text_marker.pose.position.x = obj.centroid[0]
-            text_marker.pose.position.y = obj.centroid[1]
-            text_marker.pose.position.z = 0.3 
-            text_marker.scale.z = 0.15 
-            text_marker.color.a = 1.0
-            text_marker.color.r = 1.0
-            text_marker.color.g = 1.0
-            text_marker.color.b = 1.0
-            # --- FIX: Set Lifetime ---
-            text_marker.lifetime.sec = 0
-            text_marker.lifetime.nanosec = 200000000
-
+            # 2. ID Text
+            text = Marker()
+            text.header.frame_id = "laser"
+            text.ns = "ids"
+            text.id = int(obj.id) + 1000
+            text.type = Marker.TEXT_VIEW_FACING
+            text.action = Marker.ADD
+            text.pose.position.x, text.pose.position.y = obj.centroid
+            text.pose.position.z = 0.3
+            text.scale.z = 0.15
+            text.color.a = 1.0; text.color.r = 1.0; text.color.g = 1.0; text.color.b = 1.0
             vel_mag = np.linalg.norm(obj.velocity)
-            text_marker.text = f"ID:{obj.id}\nV:{vel_mag:.2f}m/s"
-            marker_array.markers.append(text_marker)
+            text.text = f"ID:{obj.id}\nV:{vel_mag:.2f}m/s"
+            text.lifetime.nanosec = 200000000
+            marker_array.markers.append(text)
 
-            # 3. The Velocity Arrow (Red)
-            if vel_mag > 0.1: 
-                arrow_marker = Marker()
-                arrow_marker.header.frame_id = "laser"
-                arrow_marker.header.stamp = self.get_clock().now().to_msg()
-                arrow_marker.ns = "velocity"
-                arrow_marker.id = int(obj.id) + 2000
-                arrow_marker.type = Marker.ARROW
-                arrow_marker.action = Marker.ADD
-                
-                start = Point()
-                start.x = obj.centroid[0]
-                start.y = obj.centroid[1]
-                
-                end = Point()
-                end.x = obj.centroid[0] + obj.velocity[0] * 0.5
-                end.y = obj.centroid[1] + obj.velocity[1] * 0.5
-                
-                arrow_marker.points = [start, end]
-                
-                arrow_marker.scale.x = 0.05 
-                arrow_marker.scale.y = 0.1  
-                arrow_marker.scale.z = 0.1  
-                arrow_marker.color.a = 1.0
-                arrow_marker.color.r = 1.0 
-                # --- FIX: Set Lifetime ---
-                arrow_marker.lifetime.sec = 0
-                arrow_marker.lifetime.nanosec = 200000000
-                
-                marker_array.markers.append(arrow_marker)
+            # 3. Velocity Arrow
+            if vel_mag > 0.1:
+                arrow = Marker()
+                arrow.header.frame_id = "laser"
+                arrow.ns = "velocity"
+                arrow.id = int(obj.id) + 2000
+                arrow.type = Marker.ARROW
+                arrow.action = Marker.ADD
+                p1 = Point(); p1.x, p1.y = obj.centroid
+                p2 = Point(); p2.x = obj.centroid[0] + obj.velocity[0]*0.5
+                p2.y = obj.centroid[1] + obj.velocity[1]*0.5
+                arrow.points = [p1, p2]
+                arrow.scale.x = 0.05; arrow.scale.y = 0.1; arrow.scale.z = 0.1
+                arrow.color.a = 1.0; arrow.color.r = 1.0
+                arrow.lifetime.nanosec = 200000000
+                marker_array.markers.append(arrow)
 
         self.marker_pub.publish(marker_array)
 
