@@ -19,7 +19,7 @@ A LIDAR-based safety system that tracks multiple objects simultaneously and prov
 *System responding to approach: LED turns off when critical zone is breached*
 
 ### Multi-Object Tracking Visualization
-![RViz Clustering](media/rviz_clustering.png)
+![RViz Clustering](media/rviz_clustering_final.png)
 
 *Real-time LIDAR clustering showing tracked objects with velocity calculations*
 
