@@ -1,9 +1,6 @@
 # Velocity-Aware Safety Monitoring System
 
 **Real-time multi-object tracking with predictive collision warnings and hardware integration**
-
-![Demo](media/full_demo.gif)
-
 ---
 
 ## Overview
