@@ -1,6 +1,8 @@
 import rclpy
 from rclpy.node import Node
 import numpy as np
+import serial  # <---  For Arduino communication
+import time    # <---  For delays
 from sklearn.cluster import DBSCAN
 from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
@@ -35,7 +37,17 @@ class ClusterDetector(Node):
         self.min_samples = 10     # High threshold to ignore table surface noise
         self.tracker = EuclideanTracker() 
 
-        # 3. Safety Zones
+        # 3. Hardware Interface (Arduino)
+        # In WSL, Windows 'COM4' is mapped to '/dev/ttyACM0'
+        try:
+            self.serial_port = serial.Serial('/dev/ttyACM0', 9600, timeout=1)
+            time.sleep(2) # Wait for Arduino to reset after connection
+            self.get_logger().info("Connected to Arduino on /dev/ttyS4")
+        except Exception as e:
+            self.serial_port = None
+            self.get_logger().warn(f"Could not connect to Arduino: {e}")
+
+        # 4. Safety Zones
         # Note: Zones are offset to account for 0.5m blind spot masking
         
         # Warning Zone (Yellow): 1.8m Reach
@@ -48,7 +60,7 @@ class ClusterDetector(Node):
             [(0, 0.5), (0.9, 0.5), (0.9, -0.5), (0, -0.5)], 
             (1.0, 0.0, 0.0, 0.8))
 
-        # 4. Timer
+        # 5. Timer
         self.get_logger().info('Cluster Detector Node Started - Ready.')
         self.create_timer(1.0, self.publish_zones)
 
@@ -93,6 +105,17 @@ class ClusterDetector(Node):
             self.get_logger().error("!!! CRITICAL BREACH - E-STOP !!!", throttle_duration_sec=0.5)
         elif status == "WARNING":
             self.get_logger().warn("Warning - Object Approaching", throttle_duration_sec=1.0)
+        
+        # --- SEND COMMAND TO ARDUINO ---
+        if self.serial_port:
+            try:
+                if status == "CRITICAL":
+                    self.serial_port.write(b'C') # Send 'C' for Critical
+                else:
+                    self.serial_port.write(b'S') # Send 'S' for Safe
+            except Exception as e:
+                self.get_logger().error(f"Serial Error: {e}")
+            
             
         return status
 
