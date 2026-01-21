@@ -52,7 +52,7 @@ A LIDAR-based safety system that tracks multiple objects simultaneously and prov
 
 **Safety Zones**
 - Warning Zone: Predictive alerts based on object velocity
-- Critical Zone: Hardware-enforced boundary at 0.9m
+- Critical Zone: Software-defined safety boundary (effective 0.5–0.9m)
 
 ---
 
@@ -65,7 +65,7 @@ A LIDAR-based safety system that tracks multiple objects simultaneously and prov
 
 **Hardware:**
 - Slamtec RPLIDAR C1 (2D 360° laser scanner)
-- Arduino Mega 2560
+- Arduino (USB serial interface)
 - LED indicators
 
 ---
@@ -74,7 +74,7 @@ A LIDAR-based safety system that tracks multiple objects simultaneously and prov
 
 **What worked well:**
 - DBSCAN with `eps=0.3, min_samples=10` gave stable clustering
-- Moving average filter eliminated velocity noise
+- Low-pass filtering reduced velocity jitter
 - System handles multiple objects reliably
 
 **Limitations:**
@@ -110,7 +110,7 @@ ros2 run scanner_core cluster_detector
 **Terminal 3: Visualization**
 ```bash
 rviz2
-# Add LaserScan (/scan) and MarkerArray (/safety_scanner/objects)
+# Add LaserScan (/scan) and MarkerArray (/visualization_marker_array)
 ```
 
 ---
